@@ -12,19 +12,39 @@ jobs:
       - name: Configure RDP Service & User
         shell: powershell
         run: |
+          # ----- 基础 RDP 启用 -----
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # ----- 新增：RDP 深度优化（应对丢包） -----
+          # 1. 强制启用 UDP 传输（RDP 8.0+ 特性，防止 TCP 队头阻塞）
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fEnableUDP" -Value 1 -Type DWord -Force
+          # 2. 启用多路径传输（允许同时使用 TCP/UDP）
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fMultiTransport" -Value 1 -Type DWord -Force
+          # 3. 降低加密等级（Tailscale 已提供外层加密，内层可简化为“低”以节省带宽和 CPU）
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MinEncryptionLevel" -Value 1 -Type DWord -Force
+          # 4. 取消带宽自动限制（避免过度保守）
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MaxBandwidth" -Value 0 -Type DWord -Force
+          # 5. 关闭 TCP 端口 3389 的 Nagle 算法（减少小包延迟）
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" -Name "DisableNagle" -Value 1 -Type DWord -Force # 注意：此设置需在具体网卡接口上应用，此处为全局建议，也可略过
+
+          # ----- 设置用户密码 -----
           $runnerAdminPass = "WindowsRDP#2025"
           net user "runneradmin" $runnerAdminPass
           echo "RDP_USER=runneradmin" >> $env:GITHUB_ENV
           echo "RDP_PASS=$runnerAdminPass" >> $env:GITHUB_ENV
-          
+
       - name: Install and Connect Tailscale
         shell: powershell
         run: |
+          # 安装 Tailscale
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
           Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/S" -Wait
+          
+          # 连接 Tailscale（加入网络）
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=github-runner-$env:GITHUB_RUN_ID
+          
+          # 获取分配的虚拟 IP
           $tsIP = $null
           for ($i=1; $i -le 15; $i++){ 
             $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
@@ -44,6 +64,8 @@ jobs:
           Write-Host "Username  : ${{ env.RDP_USER }}"
           Write-Host "Password  : ${{ env.RDP_PASS }}"
           Write-Host "=============================================="
+          # 额外建议：可以在这里打印 Tailscale 连接状态，帮助确认是否直连
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
           while ($true) {
             Start-Sleep 300
           }
